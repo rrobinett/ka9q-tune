@@ -1,0 +1,36 @@
+[Unit]
+# R2/R3. Runs on EVERY boot, not once at install: a drop-in written after the
+# last boot looks correct in every file and is absent from the running kernel.
+# This unit is what closes that gap, and it reboots at most once per staged
+# configuration.
+#
+# Exit codes (see ka9q_tune/isolation.py):
+#    0  nothing to do -- already active, or nothing staged
+#   10  reboot invoked
+#   20  staged but NOT active and the one reboot is spent
+#
+# 10 is a success: the machine is on its way down. 20 is deliberately a FAILURE
+# so the unit shows up in `systemctl --failed` and in any monitoring that
+# watches it. A station stuck in that state is the exact condition this whole
+# package exists to make impossible to have without knowing.
+Description=Apply staged CPU isolation for radiod (at most one reboot)
+DefaultDependencies=no
+After=local-fs.target
+Before=radiod.target sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ka9q-tune isolate-oneshot
+SuccessExitStatus=0 10
+StandardOutput=journal
+StandardError=journal
+
+# Every path and command is injectable. Override them in a drop-in to test
+# this unit on a machine you are not willing to reboot:
+#   Environment=KA9Q_TUNE_REBOOT=/bin/true
+#   Environment=KA9Q_TUNE_DRY_RUN=1
+
+[Install]
+WantedBy=sysinit.target

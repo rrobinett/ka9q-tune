@@ -1,0 +1,28 @@
+[Unit]
+# Everything that can be applied to a running system: thread placement on a
+# sibling pair, the L3 partition, the frequency pin, and the refusal to run
+# with a high-rate interrupt on a nohz_full core.
+#
+# This unit never reboots. The isolation parameters it may find missing are
+# the other unit's business, and a station that is capturing must not be
+# restarted without an operator deciding to.
+Description=Apply radiod CPU placement, L3 partition and frequency pin
+After=radiod.target
+Wants=radiod.target
+PartOf=radiod.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Give radiod time to create its threads; pinning a process that has not yet
+# spawned fft and proc_rx888 pins nothing that matters.
+ExecStartPre=/bin/sleep 20
+ExecStart=/usr/local/bin/ka9q-tune apply
+# 4 is "applied, but isolation needs a reboot to take effect" -- worth
+# recording, not worth failing the unit over.
+SuccessExitStatus=0 4
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

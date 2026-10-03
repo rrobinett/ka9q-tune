@@ -1,0 +1,14 @@
+[Unit]
+# The standing watch. The fault this package exists for was invisible for
+# sixteen hours because nothing looked: radiod logged no dropped frames, every
+# unit was green, and the only evidence was a thread pegged near 100% in btop.
+Description=Check that radiod's CPU conditions are still delivered
+After=radiod.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ka9q-tune check --seconds 10
+# 1 is a warning, 2 is a fault. Both fail the unit on purpose, so a station
+# that drifts shows up in `systemctl --failed` rather than in a waterfall.
+StandardOutput=journal
+StandardError=journal

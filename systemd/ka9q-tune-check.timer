@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic check of radiod's CPU conditions
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+# Spread stations out so a fleet does not all sample at the same instant.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

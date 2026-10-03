@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Mutation runs work in temp directories, but belt and braces.
+/mutants/
+ka9q-tune.tar.gz
+
+.vscode/
+.idea/
+*.swp
+.DS_Store
