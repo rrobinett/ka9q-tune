@@ -15,6 +15,8 @@ from . import cpuset, procfs
 FFT_THREAD = "fft"
 INGEST_THREAD = "proc_rx888"
 
+UNIT_PREFIXES = ("radiod@", "ka9q-radio@")
+
 
 class Radiod:
     def __init__(self, env, topology):
@@ -26,11 +28,17 @@ class Radiod:
         self.threads = self._threads()
 
     @property
+    def started(self):
+        """Epoch seconds the process started, or None."""
+        return procfs.process_start(self.env, self.pid) if self.pid else None
+
+    @property
     def running(self):
         return self.pid is not None
 
     def _unit(self):
-        """The radiod@<station> instance name, for the report's first line."""
+        """The systemd instance running radiod: radiod@<station>, or
+        ka9q-radio@<device> as the packaged install names it."""
         override = self.env.text("RADIOD_UNIT", None)
         if override:
             return override
@@ -39,7 +47,8 @@ class Radiod:
         cgroup = self.env.read(self.env.proc_pid(self.pid, "cgroup"), "") or ""
         for line in cgroup.splitlines():
             for field in line.split("/"):
-                if field.startswith("radiod@") and field.endswith(".service"):
+                if (field.startswith(UNIT_PREFIXES)
+                        and field.endswith(".service")):
                     return field[:-len(".service")]
         for token in self.cmdline.split():
             if token.endswith(".conf"):

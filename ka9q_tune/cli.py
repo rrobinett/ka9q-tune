@@ -278,10 +278,21 @@ def cmd_wisdom(env, args, out):
             print("%-12s %s" % (miss.spec, miss.line), file=out)
         for line in unparsed:
             print("unparsed: %s" % line, file=out)
+        radiod = radiod_mod.Radiod(env, topo_mod.Topology(env))
+        if fftw.log_predates(env, radiod.started if radiod.running else None):
+            print("fft.log predates this radiod, which has logged no miss: "
+                  "these are earlier runs' transforms.", file=out)
+            return EXIT_WARN
         return EXIT_BAD
+    radiod = radiod_mod.Radiod(env, topo_mod.Topology(env))
+    # PATIENT planning of the front-end transform runs for hours on a slow
+    # core; the default command timeout would kill it every round. fft-gen
+    # saves after each transform, so an interrupted run keeps what it planned.
+    timeout = env.number("WISDOM_TIMEOUT", 0.0) or None
     ok, messages = fftw.converge(
         env,
-        lambda cmd: isolation.run_command(env, cmd),
+        lambda cmd: isolation.run_command(env, cmd, timeout=timeout),
+        restart_command=fftw.restart_command(env, radiod.unit),
         settle_seconds=args.settle,
     )
     _emit(messages, out)

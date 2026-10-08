@@ -76,7 +76,7 @@ def collect(env, seconds=30.0, sleep=None):
     _freq_line(status, env, cpus or isolated)
     _cache_line(status, env, topology, radiod)
     _irq_line(status, env, rates, irq_after.labels, cpus or isolated, topology, isolated)
-    _wisdom_line(status, env)
+    _wisdom_line(status, env, radiod.started if radiod.running else None)
 
     if threads_before and threads_after:
         status.reading = diagnose.reading_from(
@@ -334,7 +334,14 @@ def _irq_line(status, env, rates, labels, cpus, topology, isolated):
                BAD, notes)
 
 
-def _wisdom_line(status, env):
+def _age(seconds):
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return "%d min" % minutes
+    return "%d h %02d min" % (minutes // 60, minutes % 60)
+
+
+def _wisdom_line(status, env, started=None):
     misses, unparsed, exists = fftw.read_log(env)
     if not exists:
         status.add("fftw wisdom", "%s absent" % env.path("FFT_LOG"), UNKNOWN,
@@ -344,23 +351,42 @@ def _wisdom_line(status, env):
     if not misses and not unparsed:
         status.add("fftw wisdom", "fft.log empty", OK, ["no ESTIMATE plans"])
         return
-    notes = [
-        "radiod plans FFTW_WISDOM_ONLY|FFTW_PATIENT and falls back silently to "
-        "FFTW_ESTIMATE on a miss. An ESTIMATE plan is heuristic, unmeasured, "
-        "and kept for the life of the process.",
-        "This file IS the list of transforms on bad plans. Converge on it with "
-        "`ka9q-tune wisdom --plan`; a static list of sizes can never be "
-        "complete.",
-    ]
+    notes = []
     if misses:
-        notes.insert(0, "transforms: " + " ".join(m.spec for m in misses[:12])
+        notes.append("transforms: " + " ".join(m.spec for m in misses[:12])
                      + (" ..." if len(misses) > 12 else ""))
+    count = len(misses) or len(unparsed)
+    stale = fftw.log_predates(env, started)
+    if stale:
+        # Every line is from an earlier run. Not proof this radiod is clean --
+        # a transform it has not built yet can still miss -- but not evidence
+        # of a miss either, and wisdom may have been planned since.
+        notes += [
+            "fft.log was last written %s before this radiod started, and this "
+            "radiod has logged no miss. These are earlier runs' transforms; "
+            "wisdom may have been planned for them since."
+            % _age(started - env.mtime(env.path("FFT_LOG"))),
+            "`ka9q-tune wisdom --plan` re-plans them, and is quick for any "
+            "that already have wisdom.",
+        ]
+    else:
+        notes += [
+            "radiod plans FFTW_WISDOM_ONLY|FFTW_PATIENT and falls back silently "
+            "to FFTW_ESTIMATE on a miss. An ESTIMATE plan is heuristic, "
+            "unmeasured, and kept for the life of the process.",
+            "This file IS the list of transforms on bad plans. Converge on it "
+            "with `ka9q-tune wisdom --plan`; a static list of sizes can never "
+            "be complete.",
+        ]
     if unparsed:
         notes.append("%d line(s) did not match the transform pattern; first: %s"
                      % (len(unparsed), unparsed[0]))
-    status.add("fftw wisdom",
-               "%d transform(s) on ESTIMATE plans" % (len(misses) or len(unparsed)),
-               BAD, notes)
+    if stale:
+        status.add("fftw wisdom", "%d transform(s) in a stale fft.log" % count,
+                   WARN, notes)
+    else:
+        status.add("fftw wisdom", "%d transform(s) on ESTIMATE plans" % count,
+                   BAD, notes)
 
 
 # -- rendering -----------------------------------------------------------

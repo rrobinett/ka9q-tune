@@ -8,6 +8,7 @@ in the differencing shows up here.
 
 import io
 import unittest
+from unittest import mock
 
 import fakeroot
 from ka9q_tune import cli, report
@@ -252,6 +253,56 @@ class OneShotCliTest(unittest.TestCase):
             self.assertEqual(code, 0, text)
         finally:
             m.destroy()
+
+
+class WisdomTest(StationCase):
+    """fft.log on a station whose radiod started at BOOT_TIME + 60."""
+
+    def setUp(self):
+        self.m = fakeroot.healthy()
+        self.m.fft_log("cdb1200\nrof3240000\n")
+
+    def wisdom_line(self):
+        status = self.status(seconds=1.0)
+        return [l for l in status.lines if l.label == "fftw wisdom"][0]
+
+    def test_misses_logged_by_this_radiod_are_bad(self):
+        self.m.fft_log("cdb1200\nrof3240000\n", mtime=fakeroot.BOOT_TIME + 120)
+        line = self.wisdom_line()
+        self.assertEqual(line.state, report.BAD)
+        self.assertIn("2 transform(s) on ESTIMATE plans", line.value)
+
+    def test_a_log_older_than_radiod_is_stale_not_bad(self):
+        self.m.fft_log("cdb1200\nrof3240000\n", mtime=fakeroot.BOOT_TIME + 10)
+        line = self.wisdom_line()
+        self.assertEqual(line.state, report.WARN)
+        self.assertIn("stale", line.value)
+        self.assertTrue(any("before this radiod started" in n for n in line.notes))
+
+    def test_wisdom_command_says_stale_and_exits_warn(self):
+        self.m.fft_log("cdb1200\n", mtime=fakeroot.BOOT_TIME + 10)
+        code, text = run(self.m, ["wisdom"])
+        self.assertEqual(code, cli.EXIT_WARN, text)
+        self.assertIn("predates this radiod", text)
+        self.assertNotIn("unparsed", text)
+
+    def test_plan_waits_for_the_planner_and_restarts_the_running_unit(self):
+        self.m.fft_gen().radiod(unit="ka9q-radio@04b4-00f1")
+        calls = []
+
+        def fake_run(env, cmd, timeout=600):
+            calls.append((cmd, timeout))
+            return 0, ""
+
+        with mock.patch("ka9q_tune.isolation.run_command", fake_run):
+            code, text = run(self.m, ["wisdom", "--plan", "--settle", "0"],
+                             FFT_GEN=self.m.path(fakeroot.FFT_GEN))
+        self.assertEqual(code, cli.EXIT_OK, text)
+        plan = [c for c in calls if "fft-gen" in c[0]]
+        self.assertTrue(plan, calls)
+        self.assertIsNone(plan[0][1], "planning must not be cut off at 600 s")
+        self.assertIn(("systemctl restart ka9q-radio@04b4-00f1.service", None),
+                      calls)
 
 
 class ExplainTest(unittest.TestCase):

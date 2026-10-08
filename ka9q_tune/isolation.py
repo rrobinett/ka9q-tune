@@ -269,12 +269,13 @@ def grub_cfg_has(env, staged):
     return True
 
 
-def run_command(env, command):
+def run_command(env, command, timeout=600):
+    """Run a shell command. timeout=None waits as long as it takes."""
     if env.dry_run:
         return 0, "dry-run: would run %s" % command
     try:
         proc = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=600
+            command, shell=True, capture_output=True, text=True, timeout=timeout
         )
         output = (proc.stdout or "") + (proc.stderr or "")
         return proc.returncode, output.strip()
