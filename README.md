@@ -26,7 +26,8 @@ ka9q-tune stage             write the grub.d drop-in (never reboots)
 ka9q-tune isolate-oneshot   boot-time unit: apply staged isolation, one reboot
 ka9q-tune apply             pin radiod, partition L3, pin frequency, refuse bad IRQs
 
-ka9q-tune pin               thread placement alone
+ka9q-tune pin               thread placement alone (--layout pair|split)
+ka9q-tune layout            measure pair vs split on the running radiod, then restore
 ka9q-tune cache --mib 5     L3 partition alone
 ka9q-tune freq              frequency pin alone
 ka9q-tune irq --move        retarget high-rate interrupts off the isolated cores
@@ -146,6 +147,7 @@ KA9Q_TUNE_GRUB_UPDATE   command to run instead of `update-grub`
 KA9Q_TUNE_FFT_LOG       radiod's FFT planning log
 KA9Q_TUNE_FFT_GEN       radiod's planner (default `fft-gen`, looked up on PATH)
 KA9Q_TUNE_PLANNER       force `fft-gen` or `fftwf-wisdom`
+KA9Q_TUNE_LAYOUT        default placement for stage/apply/pin: pair (default) or split
 KA9Q_TUNE_FFT_INTERNAL_THREADS  radiod's fft-internal-threads (default 0); passed to fft-gen as -T
 KA9Q_TUNE_RADIOD_RESTART  restart command; default restarts radiod's own unit
 KA9Q_TUNE_WISDOM_TIMEOUT  seconds before planning is abandoned (default: none)
@@ -219,6 +221,24 @@ settled stations.
 - The specific numbers are not claimed to transfer to other hardware. The
   mechanisms and the traps should. Run `ka9q-tune baseline` on a station you
   believe is healthy and the reference becomes that station's own.
+
+## Pair or split
+
+`pair` puts fft and proc_rx888 on the two hyperthreads of one core, so they share
+L1 and L2. `split` gives each its own core and isolates both cores whole, so the
+other hyperthread of each stays idle; radiod's minor threads go to housekeeping
+CPUs. Which is faster depends on the CPU:
+
+| CPU | pair: fft / proc_rx888 | split: fft / proc_rx888 |
+| --- | --- | --- |
+| Xeon Gold 6142 (Skylake-SP, AVX-512), dp0 | 74% / 28% | 62% / 32% |
+
+The pair rule came from 6- and 8-core mobile Ryzen. `ka9q-tune layout` measures
+both on the running radiod (pair, split, pair, 30 s each, restoring placement
+afterwards) and names the faster one, or says there is no measurable
+difference. `pair` remains the default. `status` judges placement, isolation,
+the tick and interrupts by the two hot threads' CPUs, so a split station with
+its minor threads on housekeeping CPUs reads as healthy.
 
 ## On virtualised hosts
 

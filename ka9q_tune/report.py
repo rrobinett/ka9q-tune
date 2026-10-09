@@ -68,10 +68,12 @@ def collect(env, seconds=30.0, sleep=None):
     ticks = procfs.tick_rates(irq_before, irq_after, seconds)
     rates = procfs.interrupt_rates(irq_before, irq_after, seconds)
 
-    cpus = radiod.process_affinity() if radiod.running else frozenset()
+    # The hot threads' CPUs, not the union over every thread: under the split
+    # layout the minor threads are on housekeeping CPUs on purpose.
+    cpus = radiod.hot_cpus() if radiod.running else frozenset()
     isolated = state.effective_isolated()
 
-    _radiod_line(status, radiod, topology, cpus)
+    _radiod_line(status, radiod, topology, cpus, isolated)
     _isolation_lines(status, env, state, cpus, isolated, ticks, topology)
     _freq_line(status, env, cpus or isolated)
     _cache_line(status, env, topology, radiod)
@@ -89,33 +91,52 @@ def collect(env, seconds=30.0, sleep=None):
 
 # -- individual readings -------------------------------------------------
 
-def _radiod_line(status, radiod, topology, cpus):
+def _radiod_line(status, radiod, topology, cpus, isolated=frozenset()):
     if not radiod.running:
         status.add("radiod", "NOT RUNNING", BAD,
                    ["No process matched; every reading below is about an idle machine."])
         return
-    placement = topology.describe(cpus)
+    placement = radiod.placement()
+    layout = placement.layout
     state = OK
     notes = []
     if not cpus:
-        state, placement = UNKNOWN, "affinity unreadable"
-    elif topology.boot_cpu in cpus:
+        state, where = UNKNOWN, "affinity unreadable"
+    elif layout == radiod_mod.SPLIT:
+        where = ("fft on cpu%d, proc_rx888 on cpu%d (split: separate physical cores)"
+                 % (min(placement.fft), min(placement.ingest)))
+    else:
+        where = "cpus %s (%s)" % (cpuset.format(cpus), topology.describe(cpus))
+
+    if cpus and topology.boot_cpu in cpus:
         state = BAD
         notes.append(
             "radiod is on the boot CPU (%d), which the kernel silently refuses "
             "to make nohz_full. Half its sibling pair will keep ticking no "
             "matter what the command line says." % topology.boot_cpu
         )
-    elif not topology.is_sibling_pair(cpus):
+    elif layout == radiod_mod.SPLIT:
+        busy = sorted(placement.idle_siblings() - frozenset(isolated))
+        if busy:
+            state = WARN
+            notes.append(
+                "The other logical CPU of each hot core should be isolated and "
+                "idle; %s is not, so another task can share a hot thread's core."
+                % cpuset.format(busy))
+        if placement.others:
+            notes.append("%d other radiod threads on %s"
+                         % (len(radiod.threads) - len(radiod.hot_tids()[0])
+                            - len(radiod.hot_tids()[1]),
+                            cpuset.format(placement.others)))
+    elif cpus and layout is None:
         state = WARN
         notes.append(
-            "Not a hyperthread sibling pair: the fft and ingest threads will "
-            "not share L1/L2. Verified against thread_siblings_list, not "
-            "assumed from the CPU numbering."
-        )
-    status.add("radiod",
-               "%s  pid %d   cpus %s (%s)"
-               % (radiod.unit, radiod.pid, cpuset.format(cpus) or "unpinned", placement),
+            "Neither layout: the hot threads share %s across separate cores "
+            "without per-thread pinning, so they can land on one CPU together. "
+            "Use --layout pair (one core's two hyperthreads) or --layout split "
+            "(a core each); `ka9q-tune layout` measures which is faster here."
+            % cpuset.format(cpus))
+    status.add("radiod", "%s  pid %d   %s" % (radiod.unit, radiod.pid, where),
                state, notes)
 
 

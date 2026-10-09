@@ -165,6 +165,26 @@ class Machine:
         self.radiod_pid = pid
         return self
 
+    def thread_affinity(self, tid, cpus, pid=RADIOD_PID):
+        """Pin one thread in the fixture, as per-thread taskset would."""
+        with open(self.path("/proc/%d/task/%d/comm" % (pid, tid))) as fh:
+            name = fh.read().strip()
+        self.write("/proc/%d/task/%d/status" % (pid, tid),
+                   "Name:\t%s\nCpus_allowed_list:\t%s\n" % (name, cpus))
+        return self
+
+    def isolate(self, cpus, nocb):
+        """Delivered isolation for a CPU list, staged before boot."""
+        self.cmdline("BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro quiet isolcpus=%s "
+                     "nohz_full=%s rcu_nocbs=%s" % (cpus, cpus, cpus))
+        self.nohz_full(cpus).isolated(cpus)
+        for pid in range(400, 420):
+            self.remove("/proc/%d/comm" % pid)
+            self.remove("/proc/%d/cmdline" % pid)
+        self.rcu_offload(nocb)
+        self.dropin(cpus, mtime=BOOT_TIME - 3600).grub_cfg(cpus=cpus)
+        return self
+
     def thread_stat(self, pid, tid, name, utime, stime, on_cpu=8):
         # Fields: pid (comm) state ppid ... utime(14) stime(15) ... processor(39)
         fields = ["0"] * 50
@@ -312,4 +332,14 @@ def broken(root=None):
     m.irq("130", affinity="0-1")
     m.cpufreq(range(12))
     m.fft_log("")
+    return m
+
+
+def split(root=None):
+    """dp0's layout on the fixture: fft alone on cpu 8, proc_rx888 alone on
+    cpu 10, both cores (8-9, 10-11) isolated, the minor threads on 0-7."""
+    m = healthy(root)
+    m.isolate("8-11", [8, 9, 10, 11])
+    m.thread_affinity(FFT_TID, "8").thread_affinity(INGEST_TID, "10")
+    m.thread_affinity(RADIOD_PID, "0-7")
     return m
