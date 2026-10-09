@@ -314,6 +314,155 @@ class WisdomTest(unittest.TestCase):
             self.assertEqual(fh.read(), "")
 
 
+class PlannerTest(unittest.TestCase):
+    """radiod 2026-10-07 and later: d placement, fft-gen, version-named wisdom."""
+
+    def tearDown(self):
+        self.m.destroy()
+
+    def test_input_destroying_transforms_are_parsed(self):
+        # bc224260 logs out-of-place input-destroying transforms with a d.
+        self.m = fakeroot.healthy()
+        self.m.fft_log("cdb1200\nrdf640\ncof1024\nrib512\n")
+        misses, unparsed, _ = fftw.read_log(self.m.env())
+        self.assertEqual([m.spec for m in misses],
+                         ["cdb1200", "rdf640", "cof1024", "rib512"])
+        self.assertEqual(unparsed, [])
+
+    def test_fft_gen_is_preferred_when_installed(self):
+        self.m = fakeroot.healthy().fft_gen()
+        self.assertEqual(fftw.planner(self.m.env()), fftw.FFT_GEN)
+
+    def test_fftwf_wisdom_is_the_fallback(self):
+        self.m = fakeroot.healthy()
+        self.assertEqual(fftw.planner(self.m.env()), fftw.FFTW_WISDOM)
+
+    def test_fft_gen_writes_where_radiod_reads(self):
+        # No -o: fft-gen names the file after the FFTW build, as radiod does.
+        # -T 0: without it fft-gen defaults to one thread and names the file
+        # -threaded, which radiod with fft-internal-threads = 0 does not read.
+        # Found on dp0, 2026-10-09.
+        self.m = fakeroot.healthy().fft_gen()
+        cmd = fftw.plan_command(self.m.env(), ["cdb1200", "rof2048"])
+        self.assertTrue(cmd.endswith("fft-gen -v -T 0 cdb1200 rof2048"), cmd)
+        self.assertNotIn("-o", cmd.split())
+
+    def test_fft_gen_threads_follow_radiod_internal_threads(self):
+        self.m = fakeroot.healthy().fft_gen()
+        cmd = fftw.plan_command(self.m.env(FFT_INTERNAL_THREADS=2), ["rof2048"])
+        self.assertTrue(cmd.endswith("fft-gen -v -T 2 rof2048"), cmd)
+
+    def test_fftwf_wisdom_plans_input_destroying_transforms(self):
+        # fftwf-wisdom accepts the d letter: cdb64 plans with the
+        # preserve-input flag clear (fftwf-wisdom 3.3.11, dp0, 2026-10-09).
+        self.m = fakeroot.healthy()
+        self.m.fft_log("cdb1200\ncof1024\n")
+        calls = []
+
+        def run(cmd):
+            calls.append(cmd)
+            return 0, ""
+
+        ok, messages = fftw.converge(self.m.env(), run, settle_seconds=0,
+                                     sleep=lambda _s: None)
+        self.assertTrue(ok, messages)
+        self.assertTrue(any("fftwf-wisdom" in c and "cdb1200" in c for c in calls),
+                        calls)
+
+    def test_fft_gen_plans_input_destroying_transforms(self):
+        self.m = fakeroot.healthy().fft_gen()
+        self.m.fft_log("cdb1200\n")
+        calls = []
+
+        def run(cmd):
+            calls.append(cmd)
+            return 0, ""
+
+        ok, messages = fftw.converge(self.m.env(), run, settle_seconds=0,
+                                     sleep=lambda _s: None)
+        self.assertTrue(ok, messages)
+        self.assertTrue(any("fft-gen" in c and "cdb1200" in c for c in calls))
+
+
+class DryRunPlanTest(unittest.TestCase):
+    def tearDown(self):
+        self.m.destroy()
+
+    def test_dry_run_shows_the_commands_once_and_runs_nothing(self):
+        self.m = fakeroot.healthy().fft_gen()
+        self.m.fft_log("cdb1200\n")
+        calls = []
+        ok, messages = fftw.converge(
+            self.m.env(DRY_RUN=1), lambda cmd: calls.append(cmd) or (0, ""),
+            restart_command="systemctl restart ka9q-radio@x.service",
+            settle_seconds=0, sleep=lambda _s: None)
+        self.assertTrue(ok, messages)
+        self.assertEqual(calls, [])
+        text = "\n".join(messages)
+        self.assertIn("fft-gen -v -T 0 cdb1200", text)
+        self.assertIn("ka9q-radio@x.service", text)
+        self.assertEqual(text.count("round "), 1, text)
+        with open(self.m.path("/var/lib/ka9q-radio/fft.log")) as fh:
+            self.assertEqual(fh.read(), "cdb1200\n")
+
+
+class RestartTest(unittest.TestCase):
+    def tearDown(self):
+        self.m.destroy()
+
+    def test_packaged_unit_is_read_from_the_cgroup(self):
+        # The command line names /etc/radio/devices/04b4-00f1.conf, which the
+        # fallback would turn into radiod@04b4-00f1 -- a unit that is not there.
+        self.m = fakeroot.healthy()
+        self.m.radiod(unit="ka9q-radio@04b4-00f1")
+        env = self.m.env()
+        r = radiod_mod.Radiod(env, topo_mod.Topology(env))
+        self.assertEqual(r.unit, "ka9q-radio@04b4-00f1")
+
+    def test_restart_names_the_running_unit(self):
+        self.m = fakeroot.healthy()
+        self.assertEqual(
+            fftw.restart_command(self.m.env(), "ka9q-radio@04b4-00f1"),
+            "systemctl restart ka9q-radio@04b4-00f1.service")
+
+    def test_an_explicit_restart_command_wins(self):
+        self.m = fakeroot.healthy()
+        env = self.m.env(RADIOD_RESTART="my-restart")
+        self.assertEqual(fftw.restart_command(env, "ka9q-radio@x"), "my-restart")
+
+    def test_no_unit_falls_back_to_the_default(self):
+        self.m = fakeroot.healthy()
+        env = self.m.env()
+        self.assertEqual(fftw.restart_command(env, None),
+                         env.command("RADIOD_RESTART"))
+
+
+class StaleLogTest(unittest.TestCase):
+    def tearDown(self):
+        self.m.destroy()
+
+    def test_process_start_is_btime_plus_starttime(self):
+        self.m = fakeroot.healthy()
+        self.m.radiod(started=fakeroot.BOOT_TIME + 3000)
+        self.assertEqual(procfs.process_start(self.m.env(), fakeroot.RADIOD_PID),
+                         fakeroot.BOOT_TIME + 3000)
+
+    def test_a_log_older_than_radiod_predates_it(self):
+        self.m = fakeroot.healthy()
+        self.m.fft_log("cof1024\n", mtime=fakeroot.BOOT_TIME + 10)
+        self.assertTrue(fftw.log_predates(self.m.env(), fakeroot.BOOT_TIME + 60))
+
+    def test_a_log_written_since_radiod_started_does_not(self):
+        self.m = fakeroot.healthy()
+        self.m.fft_log("cof1024\n", mtime=fakeroot.BOOT_TIME + 120)
+        self.assertFalse(fftw.log_predates(self.m.env(), fakeroot.BOOT_TIME + 60))
+
+    def test_unknown_start_is_not_called_stale(self):
+        self.m = fakeroot.healthy()
+        self.m.fft_log("cof1024\n", mtime=fakeroot.BOOT_TIME + 10)
+        self.assertIsNone(fftw.log_predates(self.m.env(), None))
+
+
 class StatParsingTest(unittest.TestCase):
     def test_comm_with_spaces_and_parens(self):
         # Splitting the line on whitespace puts utime in the wrong column for

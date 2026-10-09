@@ -15,6 +15,8 @@ RADIOD_PID = 193916
 FFT_TID = RADIOD_PID + 7
 INGEST_TID = RADIOD_PID + 8
 
+FFT_GEN = "/usr/local/bin/fft-gen"
+
 BOOT_TIME = 1_759_000_000          # epoch seconds the fake kernel booted
 CONFIG_HZ = 250
 
@@ -58,7 +60,10 @@ class Machine:
         environ = {"KA9Q_TUNE_ROOT": self.root,
                    "KA9Q_TUNE_CLK_TCK": "100",
                    "KA9Q_TUNE_CONFIG_HZ": str(CONFIG_HZ),
-                   "KA9Q_TUNE_NOW": str(BOOT_TIME + 3600)}
+                   "KA9Q_TUNE_NOW": str(BOOT_TIME + 3600),
+                   # Inside the fixture, so the planner a test sees never
+                   # depends on whether the machine running it has fft-gen.
+                   "KA9Q_TUNE_FFT_GEN": self.path(FFT_GEN)}
         for key, value in overrides.items():
             environ["KA9Q_TUNE_" + key] = str(value)
         return Env(environ, sleep=sleep or (lambda _seconds: None))
@@ -136,7 +141,7 @@ class Machine:
     # -- processes --------------------------------------------------------
 
     def radiod(self, pid=RADIOD_PID, cpus="8-9", unit="radiod@WB6CXC-7",
-               threads=None):
+               threads=None, started=BOOT_TIME + 60):
         threads = threads or {FFT_TID: "fft", INGEST_TID: "proc_rx888",
                               pid: "radiod"}
         self.write("/proc/%d/comm" % pid, "radiod\n")
@@ -144,6 +149,11 @@ class Machine:
                    "radiod\0/etc/radio/%s.conf\0" % unit.split("@")[-1])
         self.write("/proc/%d/cgroup" % pid,
                    "0::/system.slice/system-radiod.slice/%s.service\n" % unit)
+        # Field 22, starttime, in clock ticks since boot (CLK_TCK 100).
+        fields = ["0"] * 50
+        fields[19] = str(int((started - BOOT_TIME) * 100))
+        self.write("/proc/%d/stat" % pid,
+                   "%d (radiod) %s\n" % (pid, " ".join(["S"] + fields[1:])))
         self.write("/proc/%d/status" % pid, "Name:\tradiod\nCpus_allowed_list:\t%s\n" % cpus)
         for tid, name in threads.items():
             base = "/proc/%d/task/%d" % (pid, tid)
@@ -256,8 +266,15 @@ class Machine:
                 self.remove(base + "/cpuinfo_cur_freq")
         return self
 
-    def fft_log(self, text=None):
-        self.write("/var/lib/ka9q-radio/fft.log", text if text is not None else "")
+    def fft_gen(self):
+        """Install radiod's planner, as a ka9q-radio built since 2026 has."""
+        full = self.write(FFT_GEN, "#!/bin/sh\nexit 0\n")
+        os.chmod(full, 0o755)
+        return self
+
+    def fft_log(self, text=None, mtime=None):
+        self.write("/var/lib/ka9q-radio/fft.log", text if text is not None else "",
+                   mtime=mtime)
         return self
 
 

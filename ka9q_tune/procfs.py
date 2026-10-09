@@ -167,6 +167,21 @@ def boot_time(env):
     return None
 
 
+def process_start(env, pid):
+    """Epoch seconds at which a process started: btime plus stat field 22."""
+    btime = boot_time(env)
+    stat = env.read(env.proc_pid(pid, "stat"), "") or ""
+    close = stat.rfind(")")
+    rest = stat[close + 1:].split() if close >= 0 else []
+    # rest[0] is field 3, so field 22 (starttime, in clock ticks) is rest[19].
+    if btime is None or len(rest) < 20 or env.clock_ticks <= 0:
+        return None
+    try:
+        return btime + int(rest[19]) / env.clock_ticks
+    except ValueError:
+        return None
+
+
 def kernel_cmdline(env):
     return env.read_stripped(env.path("PROC_CMDLINE"), "") or ""
 

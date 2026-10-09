@@ -42,6 +42,7 @@ _COMMANDS = {
     "REBOOT": "systemctl reboot",
     "GRUB_UPDATE": "update-grub",
     "FFTW_WISDOM": "fftwf-wisdom",
+    "FFT_GEN": "fft-gen",
     "RADIOD_RESTART": "systemctl restart radiod@*",
 }
 
@@ -72,6 +73,10 @@ class Env:
             if key and self.environ.get(key):
                 return self.environ[key]
         return None
+
+    def overridden(self, name):
+        """True when the environment supplies this path or command."""
+        return self._override(name) is not None
 
     def path(self, name):
         """Absolute path for a known logical name."""

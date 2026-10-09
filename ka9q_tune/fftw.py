@@ -18,12 +18,23 @@ empty. That terminates. Enumeration does not.
 
 import os
 import re
+import shutil
 import time
 
-# An FFTW wisdom-style descriptor: direction/placement/type letters then a
-# length, e.g. cof1234, cib512, rof2048. Overridable, because this parses
-# another program's log and that log's format is not a contract.
-DEFAULT_PATTERN = r"\b([cr][oi][fb]\d+)\b"
+# radiod's descriptor: type, placement, direction, then a length -- e.g.
+# cof1234, rib512, cdb1200. Placement is i (in place), o (out of place, input
+# preserved) or d (out of place, input destroyed; radiod bc224260, 2026-10-07).
+# Overridable, because this parses another program's log and that log's
+# format is not a contract.
+DEFAULT_PATTERN = r"\b([cr][iod][fb]\d+)\b"
+
+# The two planners. fft-gen ships with radiod, reads radiod's own descriptors,
+# and writes the version-named wisdom file radiod actually loads
+# (wisdom-<fftwf_version>). fftwf-wisdom is FFTW's generic tool: it writes
+# wherever -o says. Both accept the d letter (fftwf-wisdom 3.3.11 plans cdb64
+# with the preserve-input flag clear, checked on dp0).
+FFT_GEN = "fft-gen"
+FFTW_WISDOM = "fftwf-wisdom"
 
 MAX_ROUNDS = 8
 
@@ -61,6 +72,19 @@ def read_log(env):
     return misses, unparsed, True
 
 
+def log_predates(env, started):
+    """True when fft.log was last written before radiod started.
+
+    radiod appends on a miss and never rewrites the file, so a log older than
+    the process holds only earlier runs' misses: this radiod has logged none.
+    None when either time is unknown.
+    """
+    written = env.mtime(env.path("FFT_LOG"))
+    if written is None or started is None:
+        return None
+    return written < started
+
+
 def clear_log(env):
     """Truncate fft.log so the next look reports this boot's misses only.
 
@@ -79,12 +103,43 @@ def clear_log(env):
         return False, "could not truncate %s: %s" % (path, exc)
 
 
+def planner(env):
+    """FFT_GEN when it is installed, else FFTW_WISDOM. KA9Q_TUNE_PLANNER forces one."""
+    forced = env.text("PLANNER", "")
+    if forced in (FFT_GEN, FFTW_WISDOM):
+        return forced
+    command = env.command("FFT_GEN").split()
+    return FFT_GEN if command and shutil.which(command[0]) else FFTW_WISDOM
+
+
 def plan_command(env, specs):
-    threads = env.number("WISDOM_THREADS", 0) or (os.cpu_count() or 1)
-    parts = [env.command("FFTW_WISDOM"), "-v", "-T", str(threads),
-             "-o", env.path("WISDOM")]
+    if planner(env) == FFT_GEN:
+        # -T always: fft-gen defaults to ONE internal thread when -T is
+        # absent, and names its output wisdom-<version>-threaded whenever it
+        # has any. radiod reads that file only when its fft-internal-threads
+        # is above 0, and the shipped configs set 0. So -T must carry the
+        # station's fft-internal-threads, 0 unless told otherwise.
+        threads = env.number("FFT_INTERNAL_THREADS", 0)
+        parts = [env.command("FFT_GEN"), "-v", "-T", str(threads)]
+    else:
+        threads = env.number("WISDOM_THREADS", 0) or (os.cpu_count() or 1)
+        parts = [env.command("FFTW_WISDOM"), "-v", "-T", str(threads),
+                 "-o", env.path("WISDOM")]
     parts.extend(specs)
     return " ".join(parts)
+
+
+def restart_command(env, unit=None):
+    """Restart the radiod that is actually running.
+
+    The unit comes from radiod's cgroup. A packaged install runs
+    ka9q-radio@<device>, which a radiod@* glob never matches: systemctl then
+    restarts nothing and succeeds, and the planner reads an fft.log it has
+    just emptied as convergence.
+    """
+    if env.overridden("RADIOD_RESTART") or not unit or "@" not in unit:
+        return env.command("RADIOD_RESTART")
+    return "systemctl restart %s.service" % unit
 
 
 def converge(env, run_command, restart_command=None, settle_seconds=20,
@@ -117,6 +172,14 @@ def converge(env, run_command, restart_command=None, settle_seconds=20,
         specs = [m.spec for m in misses]
         messages.append("round %d: planning %d transform(s): %s"
                         % (round_number, len(specs), " ".join(specs)))
+        if env.dry_run:
+            # Nothing is planned or restarted, so a second round would only
+            # read the same log again. Show the commands instead.
+            messages.append("dry-run: would run %s" % plan_command(env, specs))
+            messages.append("dry-run: would truncate %s, run %s, and repeat "
+                            "until a restart leaves it empty"
+                            % (env.path("FFT_LOG"), restart))
+            return True, messages
         code, output = run_command(plan_command(env, specs))
         if code != 0:
             messages.append("wisdom planning failed (exit %d)%s"

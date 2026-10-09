@@ -189,6 +189,53 @@ MUTATIONS = [
         "Absent is not empty, and the difference is the whole signal.",
     ),
     Mutation(
+        "R8: forget radiod's d placement letter",
+        "fftw.py",
+        [('[cr][iod][fb]', '[cr][oi][fb]')],
+        "radiod logs input-destroying transforms as cdb1200; they went unplanned.",
+    ),
+    Mutation(
+        "R8: plan with fftwf-wisdom even when fft-gen is installed",
+        "fftw.py",
+        [("    return FFT_GEN if command and shutil.which(command[0]) else FFTW_WISDOM",
+          "    return FFTW_WISDOM")],
+        "It writes a wisdom file current radiod never reads.",
+    ),
+    Mutation(
+        "R8: leave -T off fft-gen",
+        "fftw.py",
+        [('        parts = [env.command("FFT_GEN"), "-v", "-T", str(threads)]',
+          '        parts = [env.command("FFT_GEN"), "-v"]')],
+        "fft-gen then defaults to one thread and writes wisdom-<version>-threaded,"
+        " which radiod with fft-internal-threads = 0 does not read.",
+    ),
+    Mutation(
+        "R8: restart radiod@* whatever the running unit is",
+        "fftw.py",
+        [('    return "systemctl restart %s.service" % unit',
+          '    return env.command("RADIOD_RESTART")')],
+        "On ka9q-radio@ stations that restarts nothing and reads as convergence.",
+    ),
+    Mutation(
+        "R8: recognise only radiod@ units",
+        "radiod.py",
+        [('UNIT_PREFIXES = ("radiod@", "ka9q-radio@")', 'UNIT_PREFIXES = ("radiod@",)')],
+        "The packaged unit is ka9q-radio@<device>.",
+    ),
+    Mutation(
+        "R8: call an fft.log older than radiod current",
+        "fftw.py",
+        [("    return written < started", "    return False")],
+        "Earlier runs' misses then read as this radiod's.",
+    ),
+    Mutation(
+        "R8: cut wisdom planning off at the default timeout",
+        "cli.py",
+        [('    timeout = env.number("WISDOM_TIMEOUT", 0.0) or None',
+          '    timeout = 600')],
+        "PATIENT planning of the front-end transform outlasts it on a slow core.",
+    ),
+    Mutation(
         "discriminator: call a joint elevation a transform problem",
         "diagnose.py",
         [("            return Verdict(\n                CORE,",
