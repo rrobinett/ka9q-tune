@@ -210,12 +210,6 @@ MUTATIONS = [
         " which radiod with fft-internal-threads = 0 does not read.",
     ),
     Mutation(
-        "R8: let fftwf-wisdom plan input-destroying transforms",
-        "fftw.py",
-        [("            if stranded:", "            if False:")],
-        "It plans the preserving variant; radiod keeps missing every round.",
-    ),
-    Mutation(
         "R8: restart radiod@* whatever the running unit is",
         "fftw.py",
         [('    return "systemctl restart %s.service" % unit',

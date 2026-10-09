@@ -31,7 +31,8 @@ DEFAULT_PATTERN = r"\b([cr][iod][fb]\d+)\b"
 # The two planners. fft-gen ships with radiod, reads radiod's own descriptors,
 # and writes the version-named wisdom file radiod actually loads
 # (wisdom-<fftwf_version>). fftwf-wisdom is FFTW's generic tool: it writes
-# wherever -o says and has no way to express an input-destroying transform.
+# wherever -o says. Both accept the d letter (fftwf-wisdom 3.3.11 plans cdb64
+# with the preserve-input flag clear, checked on dp0).
 FFT_GEN = "fft-gen"
 FFTW_WISDOM = "fftwf-wisdom"
 
@@ -128,10 +129,6 @@ def plan_command(env, specs):
     return " ".join(parts)
 
 
-def destroys_input(spec):
-    return len(spec) > 1 and spec[1] == "d"
-
-
 def restart_command(env, unit=None):
     """Restart the radiod that is actually running.
 
@@ -173,15 +170,6 @@ def converge(env, run_command, restart_command=None, settle_seconds=20,
                             % round_number)
             return True, messages
         specs = [m.spec for m in misses]
-        if planner(env) != FFT_GEN:
-            stranded = [spec for spec in specs if destroys_input(spec)]
-            if stranded:
-                messages.append(
-                    "%d input-destroying transform(s) (%s) can only be planned "
-                    "by fft-gen, which is not installed; %s would plan the "
-                    "input-preserving variant and radiod would still miss"
-                    % (len(stranded), " ".join(stranded[:6]), FFTW_WISDOM))
-                return False, messages
         messages.append("round %d: planning %d transform(s): %s"
                         % (round_number, len(specs), " ".join(specs)))
         if env.dry_run:

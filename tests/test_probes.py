@@ -352,7 +352,9 @@ class PlannerTest(unittest.TestCase):
         cmd = fftw.plan_command(self.m.env(FFT_INTERNAL_THREADS=2), ["rof2048"])
         self.assertTrue(cmd.endswith("fft-gen -v -T 2 rof2048"), cmd)
 
-    def test_fftwf_wisdom_cannot_plan_input_destroying_transforms(self):
+    def test_fftwf_wisdom_plans_input_destroying_transforms(self):
+        # fftwf-wisdom accepts the d letter: cdb64 plans with the
+        # preserve-input flag clear (fftwf-wisdom 3.3.11, dp0, 2026-10-09).
         self.m = fakeroot.healthy()
         self.m.fft_log("cdb1200\ncof1024\n")
         calls = []
@@ -363,10 +365,9 @@ class PlannerTest(unittest.TestCase):
 
         ok, messages = fftw.converge(self.m.env(), run, settle_seconds=0,
                                      sleep=lambda _s: None)
-        self.assertFalse(ok)
-        self.assertEqual(calls, [])
-        self.assertTrue(any("cdb1200" in m and "fft-gen" in m for m in messages),
-                        messages)
+        self.assertTrue(ok, messages)
+        self.assertTrue(any("fftwf-wisdom" in c and "cdb1200" in c for c in calls),
+                        calls)
 
     def test_fft_gen_plans_input_destroying_transforms(self):
         self.m = fakeroot.healthy().fft_gen()
