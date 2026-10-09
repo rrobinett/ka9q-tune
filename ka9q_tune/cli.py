@@ -16,6 +16,7 @@ import os
 import sys
 
 from . import cache, cpuset, diagnose, fftw, freq as freq_mod, irq as irq_mod
+from . import layout as layout_mod
 from . import isolation, procfs, radiod as radiod_mod, report, topology as topo_mod
 from .env import Env
 
@@ -74,9 +75,10 @@ def cmd_oneshot(env, args, out):
 
 def cmd_stage(env, args, out):
     topology, radiod, state = _machine(env)
-    cpus = _target_cpus(env, args, topology, radiod, state, out)
-    if not cpus:
+    place = _target(env, args, topology, radiod, state, out)
+    if not place:
         return EXIT_REFUSED
+    cpus = place.isolate
     body = (
         "# Written by ka9q-tune. The three parameters only work as a set:\n"
         "#   isolcpus   keeps a second runnable task off the CPU\n"
@@ -108,9 +110,10 @@ def cmd_apply(env, args, out):
     rates, ticks, labels = _sample_interrupts(env, args.irq_seconds)
     isolated = state.effective_isolated()
 
-    cpus = _target_cpus(env, args, topology, radiod, state, out, rates=rates)
-    if not cpus:
+    place = _target(env, args, topology, radiod, state, out, rates=rates)
+    if not place:
         return EXIT_REFUSED
+    cpus = place.isolate
 
     # R6, checked before anything is applied. A nohz_full core carrying a
     # high-rate interrupt is a configuration error, not a warning.
@@ -140,7 +143,7 @@ def cmd_apply(env, args, out):
 
     failures = 0
 
-    ok, messages = radiod.pin(cpus)
+    ok, messages = place.pin(radiod)
     _emit(("  " + m for m in messages), out)
     failures += 0 if ok else 1
 
@@ -154,9 +157,9 @@ def cmd_apply(env, args, out):
         failures += 0 if ok else 1
 
     if not args.no_freq:
-        khz = args.freq_khz or freq_mod.target_khz(env, cpus)
+        khz = args.freq_khz or freq_mod.target_khz(env, place.hot)
         if khz:
-            for cpu in sorted(cpus):
+            for cpu in sorted(place.hot):
                 ok, messages = freq_mod.CpuFreq(env, cpu).set_pinned(khz)
                 _emit(("  " + m for m in messages), out)
                 failures += 0 if ok else 1
@@ -177,10 +180,10 @@ def cmd_apply(env, args, out):
 
 def cmd_pin(env, args, out):
     topology, radiod, state = _machine(env)
-    cpus = _target_cpus(env, args, topology, radiod, state, out)
-    if not cpus:
+    place = _target(env, args, topology, radiod, state, out)
+    if not place:
         return EXIT_REFUSED
-    ok, messages = radiod.pin(cpus)
+    ok, messages = place.pin(radiod)
     _emit(messages, out)
     return EXIT_OK if ok else EXIT_BAD
 
@@ -213,7 +216,7 @@ def cmd_cache(env, args, out):
 
 def cmd_freq(env, args, out):
     topology, radiod, state = _machine(env)
-    cpus = radiod.process_affinity() or state.effective_isolated() or frozenset(topology.online)
+    cpus = radiod.hot_cpus() or state.effective_isolated() or frozenset(topology.online)
     if args.show:
         for cpu, f in sorted(freq_mod.survey(env, cpus).items()):
             if not f.present:
@@ -240,7 +243,7 @@ def cmd_irq(env, args, out):
     topology, radiod, state = _machine(env)
     rates, _, labels = _sample_interrupts(env, args.irq_seconds)
     isolated = state.effective_isolated()
-    cpus = radiod.process_affinity() or isolated
+    cpus = radiod.hot_cpus() or isolated
     threshold = env.number("IRQ_HIGH_RATE", irq_mod.DEFAULT_HIGH_RATE)
     findings = irq_mod.conflicts(env, rates, labels, cpus, threshold)
     if not findings:
@@ -321,13 +324,42 @@ def cmd_baseline(env, args, out):
               file=out)
         return EXIT_BAD
     ok, detail = diagnose.save_baseline(env, reading, {
-        "cpus": cpuset.format(radiod.process_affinity()),
+        "cpus": cpuset.format(radiod.hot_cpus()),
         "isolated": cpuset.format(state.effective_isolated()),
     })
     print(detail, file=out)
     print("baseline: fft %.1f%%  proc_rx888 %.1f%%" % (reading.fft, reading.ingest),
           file=out)
     return EXIT_OK if ok else EXIT_BAD
+
+
+def cmd_layout(env, args, out):
+    topology, radiod, state = _machine(env)
+    if not radiod.running:
+        print("radiod is not running; there is nothing to measure", file=out)
+        return EXIT_BAD
+    fft, ingest = radiod.hot_tids()
+    if not fft or not ingest:
+        print("radiod has no fft or proc_rx888 thread to measure", file=out)
+        return EXIT_BAD
+    chosen = layout_mod.candidates(topology, state.effective_isolated(),
+                                   current=radiod.hot_cpus())
+    if not chosen:
+        print("REFUSED: comparing the layouts needs two physical cores with two "
+              "logical CPUs each, besides the boot CPU's", file=out)
+        return EXIT_REFUSED
+    a, a_sibling, b = chosen
+    print("pair: fft on cpu%d, proc_rx888 on cpu%d (same core)\n"
+          "split: fft on cpu%d, proc_rx888 on cpu%d (another core)\n"
+          "%.0f s per window, pair / split / pair; placement is restored after"
+          % (a, a_sibling, a, b, args.seconds), file=out)
+    if env.dry_run:
+        print("dry-run: nothing measured or moved", file=out)
+        return EXIT_OK
+    result = layout_mod.measure(env, radiod, a, a_sibling, b,
+                                seconds=args.seconds, settle=args.settle)
+    _emit(layout_mod.render(result), out)
+    return EXIT_OK if result.windows else EXIT_BAD
 
 
 def cmd_explain(env, args, out):
@@ -341,6 +373,99 @@ def _cache_target(env, args):
     if getattr(args, "mib", None):
         return int(args.mib * 1024 * 1024)
     return int(env.number("L3_BYTES", 0)) or cache.DEFAULT_TARGET_BYTES
+
+
+class Target:
+    """Where radiod's hot threads go, and which CPUs to isolate for that.
+
+    pair:  hot = isolate = one physical core's sibling set; every thread on it.
+    split: fft alone on one CPU, proc_rx888 alone on a CPU of another core,
+           isolate = both cores whole, every other thread on housekeeping.
+    """
+
+    def __init__(self, layout, isolate, fft_cpu=None, ingest_cpu=None, others=frozenset()):
+        self.layout = layout
+        self.isolate = frozenset(isolate)
+        self.fft_cpu = fft_cpu
+        self.ingest_cpu = ingest_cpu
+        self.others = frozenset(others)
+
+    @property
+    def hot(self):
+        if self.layout == radiod_mod.SPLIT:
+            return frozenset([self.fft_cpu, self.ingest_cpu])
+        return self.isolate
+
+    def pin(self, radiod):
+        if self.layout == radiod_mod.SPLIT:
+            return radiod.pin_split(self.fft_cpu, self.ingest_cpu, self.others)
+        return radiod.pin(self.isolate)
+
+
+def _layout(env, args):
+    layout = getattr(args, "layout", None) or env.text("LAYOUT", radiod_mod.PAIR)
+    return layout if layout in radiod_mod.LAYOUTS else None
+
+
+def _avoid(env, rates):
+    if not rates:
+        return frozenset()
+    threshold = env.number("IRQ_HIGH_RATE", irq_mod.DEFAULT_HIGH_RATE)
+    return frozenset(
+        cpu for per_cpu in
+        (v for k, v in rates.items() if k not in irq_mod.NON_DEVICE)
+        for cpu, rate in per_cpu.items() if rate >= threshold
+    )
+
+
+def _target(env, args, topology, radiod, state, out, rates=None):
+    """The Target for --layout, from --cpus or chosen from topology. None = refused."""
+    layout = _layout(env, args)
+    if layout is None:
+        print("REFUSED: unknown layout %r; use pair or split"
+              % (getattr(args, "layout", None) or env.text("LAYOUT", "")), file=out)
+        return None
+    if layout == radiod_mod.SPLIT:
+        return _split_target(env, args, topology, state, out, rates)
+    cpus = _target_cpus(env, args, topology, radiod, state, out, rates)
+    return Target(radiod_mod.PAIR, cpus) if cpus else None
+
+
+def _split_target(env, args, topology, state, out, rates):
+    if getattr(args, "cpus", None):
+        try:
+            order = [int(c) for c in args.cpus.split(",")]
+        except ValueError:
+            order = []
+        if len(order) != 2:
+            print("--layout split takes --cpus FFT,INGEST: two CPUs, fft first",
+                  file=out)
+            return None
+        fft_cpu, ingest_cpu = order
+        if topology.boot_cpu in order:
+            print("REFUSED: cpu%d is the boot CPU and can never be nohz_full."
+                  % topology.boot_cpu, file=out)
+            return None
+        fft_core = topology.siblings.get(fft_cpu, frozenset([fft_cpu]))
+        if ingest_cpu in fft_core:
+            print("REFUSED: cpu%d and cpu%d share a physical core; that is the "
+                  "pair layout, not split" % (fft_cpu, ingest_cpu), file=out)
+            return None
+        isolate = fft_core | topology.siblings.get(ingest_cpu, frozenset([ingest_cpu]))
+        reason = "from --cpus"
+    else:
+        isolated = state.effective_isolated() or state.staged.get("nohz_full", frozenset())
+        fft_cpu, ingest_cpu, isolate, reason = radiod_mod.choose_split(
+            topology, isolated, avoid=_avoid(env, rates))
+        if fft_cpu is None:
+            print("REFUSED: %s" % reason, file=out)
+            return None
+    others = frozenset(topology.online) - isolate
+    print("split: fft on cpu%d, proc_rx888 on cpu%d, isolate %s (both cores "
+          "whole, so nothing runs beside either), other threads on %s: %s"
+          % (fft_cpu, ingest_cpu, cpuset.format(isolate), cpuset.format(others),
+             reason), file=out)
+    return Target(radiod_mod.SPLIT, isolate, fft_cpu, ingest_cpu, others)
 
 
 def _target_cpus(env, args, topology, radiod, state, out, rates=None):
@@ -359,16 +484,10 @@ def _target_cpus(env, args, topology, radiod, state, out, rates=None):
         if not topology.is_sibling_pair(cpus):
             print("warning: %s is not a hyperthread sibling pair "
                   "(thread_siblings_list says otherwise); the fft and ingest "
-                  "threads will not share L1/L2." % cpuset.format(cpus), file=out)
+                  "threads will not share L1/L2. For two separate cores use "
+                  "--layout split." % cpuset.format(cpus), file=out)
         return cpus
-    avoid = frozenset()
-    if rates:
-        threshold = env.number("IRQ_HIGH_RATE", irq_mod.DEFAULT_HIGH_RATE)
-        avoid = frozenset(
-            cpu for per_cpu in
-            (v for k, v in rates.items() if k not in irq_mod.NON_DEVICE)
-            for cpu, rate in per_cpu.items() if rate >= threshold
-        )
+    avoid = _avoid(env, rates)
     isolated = state.effective_isolated() or state.staged.get("nohz_full", frozenset())
     cpus, reason = radiod_mod.choose_pair(topology, isolated, avoid=avoid)
     if not cpus:
@@ -462,11 +581,18 @@ def build_parser():
     add("isolate-oneshot", cmd_oneshot,
         "boot-time unit: apply staged isolation, at most one reboot")
 
+    layout_help = ("pair: both hot threads on one core's hyperthreads; split: "
+                   "each on its own core, siblings idle. `ka9q-tune layout` "
+                   "measures which is faster here (default pair)")
+
     p = add("stage", cmd_stage, "write the grub.d drop-in (does not reboot)")
-    p.add_argument("--cpus", help="CPU list, e.g. 8-9; chosen from topology if omitted")
+    p.add_argument("--cpus", help="CPU list, e.g. 8-9; chosen from topology if "
+                   "omitted. With --layout split: FFT,INGEST, e.g. 2,4")
+    p.add_argument("--layout", choices=radiod_mod.LAYOUTS, help=layout_help)
 
     p = add("apply", cmd_apply, "pin radiod, partition L3, pin frequency")
     p.add_argument("--cpus")
+    p.add_argument("--layout", choices=radiod_mod.LAYOUTS, help=layout_help)
     p.add_argument("--mib", type=float, help="L3 target in MiB (default 5)")
     p.add_argument("--freq-khz", type=int)
     p.add_argument("--move-irqs", action="store_true",
@@ -477,8 +603,15 @@ def build_parser():
     p.add_argument("--no-freq", action="store_true")
     p.add_argument("--irq-seconds", type=float, default=2.0)
 
-    p = add("pin", cmd_pin, "pin radiod's threads to a sibling pair")
+    p = add("pin", cmd_pin, "pin radiod's hot threads (pair or split layout)")
     p.add_argument("--cpus")
+    p.add_argument("--layout", choices=radiod_mod.LAYOUTS, help=layout_help)
+
+    p = add("layout", cmd_layout,
+            "measure pair vs split on the running radiod, then restore it")
+    p.add_argument("--seconds", type=float, default=30.0,
+                   help="per window; three windows (default 30)")
+    p.add_argument("--settle", type=float, default=2.0)
 
     p = add("cache", cmd_cache, "partition L3 by bytes")
     p.add_argument("--mib", type=float)
