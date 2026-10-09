@@ -295,6 +295,19 @@ MUTATIONS = [
         "A measurement run leaves radiod on whatever layout it tested last.",
     ),
     Mutation(
+        "#2: accept any claimed sibling where the topology can check it",
+        "layout.py",
+        [("        if a_sibling not in core:", "        if False:")],
+        "On a host with visible SMT, a wrong --cpus would measure a fake pair.",
+    ),
+    Mutation(
+        "#2: allow the boot CPU in layout --cpus",
+        "layout.py",
+        [("    if topology.boot_cpu in cpus:\n        return None, \"cpu%d is the boot CPU\" % topology.boot_cpu",
+          "    if False:\n        return None, \"cpu%d is the boot CPU\" % topology.boot_cpu")],
+        "The boot CPU can never be nohz_full.",
+    ),
+    Mutation(
         "discriminator: call a joint elevation a transform problem",
         "diagnose.py",
         [("            return Verdict(\n                CORE,",

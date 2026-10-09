@@ -58,6 +58,40 @@ def candidates(topology, isolated, current=frozenset()):
     return a, min(first - {a}), min(second)
 
 
+def given(topology, text):
+    """Parse --cpus FFT,SIBLING,OTHER. Returns ((a, a_sibling, b), note) or
+    (None, reason).
+
+    A guest that is not told about SMT sees every vCPU as its own core, so it
+    cannot find the pair itself; the operator, who knows the host pinning, can.
+    Where this machine's topology does show siblings, the claim is checked.
+    """
+    try:
+        cpus = [int(c) for c in text.split(",")]
+    except ValueError:
+        cpus = []
+    if len(cpus) != 3 or len(set(cpus)) != 3:
+        return None, ("--cpus takes three different CPUs: FFT,SIBLING,OTHER -- "
+                      "fft's CPU, its hyperthread sibling, and a CPU on another core")
+    a, a_sibling, b = cpus
+    if topology.boot_cpu in cpus:
+        return None, "cpu%d is the boot CPU" % topology.boot_cpu
+    unknown = [c for c in cpus if c not in topology.online]
+    if unknown:
+        return None, "not online here: %s" % ", ".join("cpu%d" % c for c in unknown)
+    core = topology.siblings.get(a, frozenset([a]))
+    if len(core) > 1:
+        if a_sibling not in core:
+            return None, ("cpu%d is not cpu%d's sibling here (thread_siblings_list "
+                          "says %s)" % (a_sibling, a, ",".join(map(str, sorted(core)))))
+        if b in core:
+            return None, "cpu%d shares cpu%d's core; the split CPU must not" % (b, a)
+        return (a, a_sibling, b), "checked against thread_siblings_list"
+    return (a, a_sibling, b), (
+        "this machine shows no hyperthreads (a guest not told about SMT), so "
+        "the sibling relationship is taken as given, not checked")
+
+
 def verdict(windows):
     """Compare the split window with the mean of the two pair windows."""
     pair1, split, pair2 = windows
