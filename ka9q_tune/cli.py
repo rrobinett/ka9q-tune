@@ -342,12 +342,21 @@ def cmd_layout(env, args, out):
     if not fft or not ingest:
         print("radiod has no fft or proc_rx888 thread to measure", file=out)
         return EXIT_BAD
-    chosen = layout_mod.candidates(topology, state.effective_isolated(),
-                                   current=radiod.hot_cpus())
-    if not chosen:
-        print("REFUSED: comparing the layouts needs two physical cores with two "
-              "logical CPUs each, besides the boot CPU's", file=out)
-        return EXIT_REFUSED
+    if args.cpus:
+        chosen, note = layout_mod.given(topology, args.cpus)
+        if not chosen:
+            print("REFUSED: %s" % note, file=out)
+            return EXIT_REFUSED
+        print("cpus from --cpus: %s" % note, file=out)
+    else:
+        chosen = layout_mod.candidates(topology, state.effective_isolated(),
+                                       current=radiod.hot_cpus())
+        if not chosen:
+            print("REFUSED: comparing the layouts needs two physical cores with "
+                  "two logical CPUs each, besides the boot CPU's. In a guest "
+                  "that is not told about SMT, name them: --cpus FFT,SIBLING,OTHER "
+                  "(the sibling as the host pins it).", file=out)
+            return EXIT_REFUSED
     a, a_sibling, b = chosen
     print("pair: fft on cpu%d, proc_rx888 on cpu%d (same core)\n"
           "split: fft on cpu%d, proc_rx888 on cpu%d (another core)\n"
@@ -612,6 +621,9 @@ def build_parser():
     p.add_argument("--seconds", type=float, default=30.0,
                    help="per window; three windows (default 30)")
     p.add_argument("--settle", type=float, default=2.0)
+    p.add_argument("--cpus", help="FFT,SIBLING,OTHER: fft's CPU, its hyperthread "
+                   "sibling, a CPU on another core. Needed in a guest that "
+                   "shows no hyperthreads")
 
     p = add("cache", cmd_cache, "partition L3 by bytes")
     p.add_argument("--mib", type=float)

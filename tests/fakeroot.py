@@ -74,15 +74,21 @@ class Machine:
         self.write("/sys/devices/system/cpu/online", "0-%d\n" % (logical - 1))
         half = logical // 2
         for cpu in range(logical):
-            if siblings == "sequential":
+            if siblings == "none":            # a guest not told about SMT
+                core = cpu
+                pair = (cpu, cpu)
+            elif siblings == "sequential":
                 core = cpu // 2
                 pair = (core * 2, core * 2 + 1)
             else:                       # split: {0,6},{1,7}, ...
                 core = cpu % half
                 pair = (core, core + half)
             base = "/sys/devices/system/cpu/cpu%d/topology" % cpu
-            self.write(base + "/thread_siblings_list", "%d-%d\n" % pair
-                       if pair[1] == pair[0] + 1 else "%d,%d\n" % pair)
+            if pair[0] == pair[1]:
+                self.write(base + "/thread_siblings_list", "%d\n" % cpu)
+            else:
+                self.write(base + "/thread_siblings_list", "%d-%d\n" % pair
+                           if pair[1] == pair[0] + 1 else "%d,%d\n" % pair)
             self.write(base + "/core_id", "%d\n" % core)
             self.write(base + "/physical_package_id", "0\n")
             idx = "/sys/devices/system/cpu/cpu%d/cache/index3" % cpu

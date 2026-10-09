@@ -283,6 +283,44 @@ class LayoutCommandTest(unittest.TestCase):
     def tearDown(self):
         self.m.destroy()
 
+    def guest(self):
+        """dp0's VM 502: no hyperthreads visible, fft on 1, proc_rx888 on 2."""
+        self.m = fakeroot.split()
+        self.m.topology(logical=12, siblings="none")
+        self.m.thread_affinity(FFT_TID, "1").thread_affinity(INGEST_TID, "2")
+        return self.m
+
+    def test_a_guest_without_smt_is_refused_with_the_way_out(self):
+        self.guest()
+        code, text = run(self.m, ["--dry-run", "layout"])
+        self.assertEqual(code, cli.EXIT_REFUSED)
+        self.assertIn("--cpus FFT,SIBLING,OTHER", text)
+
+    def test_a_guest_can_name_the_pair_it_cannot_see(self):
+        self.guest()
+        code, text = run(self.m, ["--dry-run", "layout", "--cpus", "1,7,2"])
+        self.assertEqual(code, cli.EXIT_OK, text)
+        self.assertIn("taken as given", text)
+        self.assertIn("pair: fft on cpu1, proc_rx888 on cpu7", text)
+        self.assertIn("split: fft on cpu1, proc_rx888 on cpu2", text)
+
+    def test_where_siblings_are_visible_a_wrong_claim_is_refused(self):
+        self.m = fakeroot.split()
+        code, text = run(self.m, ["--dry-run", "layout", "--cpus", "8,10,2"])
+        self.assertEqual(code, cli.EXIT_REFUSED)
+        self.assertIn("not cpu8's sibling", text)
+
+    def test_the_split_cpu_may_not_share_the_fft_core(self):
+        self.m = fakeroot.split()
+        code, text = run(self.m, ["--dry-run", "layout", "--cpus", "8,9,9"])
+        self.assertEqual(code, cli.EXIT_REFUSED)
+
+    def test_the_boot_cpu_is_refused_in_cpus(self):
+        self.guest()
+        code, text = run(self.m, ["--dry-run", "layout", "--cpus", "0,7,2"])
+        self.assertEqual(code, cli.EXIT_REFUSED)
+        self.assertIn("boot CPU", text)
+
     def test_dry_run_names_both_layouts_and_moves_nothing(self):
         self.m = fakeroot.split()
         with mock.patch.object(radiod_mod.Radiod, "set_affinity") as moved:
