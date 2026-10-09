@@ -202,11 +202,12 @@ MUTATIONS = [
         "It writes a wisdom file current radiod never reads.",
     ),
     Mutation(
-        "R8: give fft-gen threads",
+        "R8: leave -T off fft-gen",
         "fftw.py",
-        [('        parts = [env.command("FFT_GEN"), "-v"]',
-          '        parts = [env.command("FFT_GEN"), "-v", "-T", "4"]')],
-        "fft-gen then writes wisdom-<version>-threaded, which radiod does not read.",
+        [('        parts = [env.command("FFT_GEN"), "-v", "-T", str(threads)]',
+          '        parts = [env.command("FFT_GEN"), "-v"]')],
+        "fft-gen then defaults to one thread and writes wisdom-<version>-threaded,"
+        " which radiod with fft-internal-threads = 0 does not read.",
     ),
     Mutation(
         "R8: let fftwf-wisdom plan input-destroying transforms",

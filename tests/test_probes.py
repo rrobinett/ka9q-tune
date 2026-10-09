@@ -339,12 +339,18 @@ class PlannerTest(unittest.TestCase):
 
     def test_fft_gen_writes_where_radiod_reads(self):
         # No -o: fft-gen names the file after the FFTW build, as radiod does.
-        # No -T: that would name it -threaded, which radiod does not read.
+        # -T 0: without it fft-gen defaults to one thread and names the file
+        # -threaded, which radiod with fft-internal-threads = 0 does not read.
+        # Found on dp0, 2026-10-09.
         self.m = fakeroot.healthy().fft_gen()
         cmd = fftw.plan_command(self.m.env(), ["cdb1200", "rof2048"])
-        self.assertTrue(cmd.endswith("fft-gen -v cdb1200 rof2048"), cmd)
-        self.assertNotIn("-T", cmd.split())
+        self.assertTrue(cmd.endswith("fft-gen -v -T 0 cdb1200 rof2048"), cmd)
         self.assertNotIn("-o", cmd.split())
+
+    def test_fft_gen_threads_follow_radiod_internal_threads(self):
+        self.m = fakeroot.healthy().fft_gen()
+        cmd = fftw.plan_command(self.m.env(FFT_INTERNAL_THREADS=2), ["rof2048"])
+        self.assertTrue(cmd.endswith("fft-gen -v -T 2 rof2048"), cmd)
 
     def test_fftwf_wisdom_cannot_plan_input_destroying_transforms(self):
         self.m = fakeroot.healthy()
@@ -392,7 +398,7 @@ class DryRunPlanTest(unittest.TestCase):
         self.assertTrue(ok, messages)
         self.assertEqual(calls, [])
         text = "\n".join(messages)
-        self.assertIn("fft-gen -v cdb1200", text)
+        self.assertIn("fft-gen -v -T 0 cdb1200", text)
         self.assertIn("ka9q-radio@x.service", text)
         self.assertEqual(text.count("round "), 1, text)
         with open(self.m.path("/var/lib/ka9q-radio/fft.log")) as fh:

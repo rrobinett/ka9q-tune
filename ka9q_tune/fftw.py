@@ -113,9 +113,13 @@ def planner(env):
 
 def plan_command(env, specs):
     if planner(env) == FFT_GEN:
-        # No -T: fft-gen names its output wisdom-<version>-threaded when given
-        # threads, and radiod reads that file only when it runs threaded too.
-        parts = [env.command("FFT_GEN"), "-v"]
+        # -T always: fft-gen defaults to ONE internal thread when -T is
+        # absent, and names its output wisdom-<version>-threaded whenever it
+        # has any. radiod reads that file only when its fft-internal-threads
+        # is above 0, and the shipped configs set 0. So -T must carry the
+        # station's fft-internal-threads, 0 unless told otherwise.
+        threads = env.number("FFT_INTERNAL_THREADS", 0)
+        parts = [env.command("FFT_GEN"), "-v", "-T", str(threads)]
     else:
         threads = env.number("WISDOM_THREADS", 0) or (os.cpu_count() or 1)
         parts = [env.command("FFTW_WISDOM"), "-v", "-T", str(threads),
